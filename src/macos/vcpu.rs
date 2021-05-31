@@ -431,7 +431,6 @@ impl UhyveCPU {
 		if let Ok(instr) = disassemble_64(code, rip as usize, code.len()) {
 			match instr.operation {
 				InstructionOperation::MOV => {
-					//info!("operands {:?}", instr.operands);
 					if write {
 						let val = match instr.operands[1].operand {
 							OperandType::IMM => instr.operands[1].immediate as u64,
@@ -441,7 +440,23 @@ impl UhyveCPU {
 							OperandType::REG_ESI => {
 								self.vcpu.read_register(&x86Reg::RSI)? & 0xFFFFFFFF
 							}
+							OperandType::REG_EBP => {
+								self.vcpu.read_register(&x86Reg::RBP)? & 0xFFFFFFFF
+							}
+							OperandType::REG_EAX => {
+								self.vcpu.read_register(&x86Reg::RAX)? & 0xFFFFFFFF
+							}
+							OperandType::REG_EBX => {
+								self.vcpu.read_register(&x86Reg::RBX)? & 0xFFFFFFFF
+							}
+							OperandType::REG_ECX => {
+								self.vcpu.read_register(&x86Reg::RCX)? & 0xFFFFFFFF
+							}
+							OperandType::REG_EDX => {
+								self.vcpu.read_register(&x86Reg::RDX)? & 0xFFFFFFFF
+							}
 							_ => {
+								error!("IO-APIC write failed: {:?}", instr.operands);
 								return Err(Error::InternalError);
 							}
 						};
@@ -453,19 +468,39 @@ impl UhyveCPU {
 					}
 
 					if read {
+						let value = self.ioapic.lock().unwrap().read(address - IOAPIC_BASE)?;
+
 						match instr.operands[0].operand {
+							OperandType::REG_EDI => {
+								self.vcpu.write_register(&x86Reg::RDI, value)?;
+							}
+							OperandType::REG_ESI => {
+								self.vcpu.write_register(&x86Reg::RSI, value)?;
+							}
+							OperandType::REG_EBP => {
+								self.vcpu.write_register(&x86Reg::RBP, value)?;
+							}
 							OperandType::REG_EAX => {
-								let value =
-									self.ioapic.lock().unwrap().read(address - IOAPIC_BASE)?;
 								self.vcpu.write_register(&x86Reg::RAX, value)?;
 							}
+							OperandType::REG_EBX => {
+								self.vcpu.write_register(&x86Reg::RBX, value)?;
+							}
+							OperandType::REG_ECX => {
+								self.vcpu.write_register(&x86Reg::RCX, value)?;
+							}
+							OperandType::REG_EDX => {
+								self.vcpu.write_register(&x86Reg::RDX, value)?;
+							}
 							_ => {
+								error!("IO-APIC read failed: {:?}", instr.operands);
 								return Err(Error::InternalError);
 							}
 						}
 					}
 				}
 				_ => {
+					error!("IO-APIC Emulation failed");
 					return Err(Error::InternalError);
 				}
 			}
@@ -548,7 +583,7 @@ impl VirtualCPU for UhyveCPU {
 		(entry & ((!0usize) << PAGE_BITS)) | (addr & !((!0usize) << PAGE_BITS))
 	}
 
-	fn run(&mut self) -> Result<()> {
+	fn run(&mut self) -> Result<Option<i32>> {
 		//self.print_registers();
 
 		// Pause first CPU before first execution, so we have time to attach debugger
@@ -652,7 +687,7 @@ impl VirtualCPU for UhyveCPU {
 
 					match port {
 						SHUTDOWN_PORT => {
-							return Ok(());
+							return Ok(None);
 						}
 						UHYVE_UART_PORT => {
 							let al = (self.vcpu.read_register(&x86Reg::RAX)? & 0xFF) as u8;
@@ -677,7 +712,7 @@ impl VirtualCPU for UhyveCPU {
 						UHYVE_PORT_EXIT => {
 							let data_addr: u64 =
 								self.vcpu.read_register(&x86Reg::RAX)? & 0xFFFFFFFF;
-							self.exit(self.host_address(data_addr as usize));
+							return Ok(Some(self.exit(self.host_address(data_addr as usize))));
 						}
 						UHYVE_PORT_OPEN => {
 							let data_addr: u64 =

@@ -1,11 +1,15 @@
 #[macro_use]
 extern crate log;
-
 #[macro_use]
 extern crate clap;
 
+#[cfg(feature = "instrument")]
+extern crate rftrace;
+#[cfg(feature = "instrument")]
+extern crate rftrace_frontend;
+
 use std::env;
-use std::sync::atomic::spin_loop_hint;
+use std::hint;
 use std::sync::Arc;
 use std::thread;
 
@@ -14,11 +18,41 @@ use uhyvelib::vm;
 use uhyvelib::vm::Vm;
 
 use clap::{App, Arg};
+use core_affinity::CoreId;
+#[cfg(feature = "instrument")]
+use rftrace_frontend::Events;
+use uhyvelib::utils::{filter_cpu_affinity, parse_cpu_affinity};
 
 const MINIMAL_GUEST_SIZE: usize = 16 * 1024 * 1024;
 const DEFAULT_GUEST_SIZE: usize = 64 * 1024 * 1024;
 
+#[cfg(feature = "instrument")]
+static mut EVENTS: Option<Box<&mut Events>> = None;
+
+#[cfg(feature = "instrument")]
+extern "C" fn dump_trace() {
+	unsafe {
+		if let Some(ref mut e) = EVENTS {
+			rftrace_frontend::dump_full_uftrace(&mut *e, "uhyve_trace", "uhyve", true)
+				.expect("Saving trace failed");
+		}
+	}
+}
+
+// Note that we end main with `std::process::exit` to set the return value and
+// as a result destructors are not run and cleanup may not happen.
 fn main() {
+	#[cfg(feature = "instrument")]
+	{
+		let events = Box::new(rftrace_frontend::init(1000000, true));
+		rftrace_frontend::enable();
+
+		unsafe {
+			EVENTS = Some(events);
+			libc::atexit(dump_trace);
+		}
+	}
+
 	env_logger::init();
 
 	let matches = App::new("uhyve")
@@ -34,7 +68,7 @@ fn main() {
 				.help("Print also kernel messages"),
 		)
 		.arg(
-			Arg::with_name("HUGEPAGE")
+			Arg::with_name("DISABLE_HUGEPAGE")
 				.long("disable-hugepages")
 				.help("Disable the usage of huge pages"),
 		)
@@ -60,6 +94,19 @@ fn main() {
 				.help("Number of guest processors")
 				.takes_value(true)
 				.env("HERMIT_CPUS"),
+		)
+		.arg(
+			Arg::with_name("CPU_AFFINITY")
+				.short("a")
+				.long("affinity")
+				.value_name("cpulist")
+				.help("CPU Affinity of guest CPUs on Host")
+				.long_help(
+					"A list of CPUs delimited by commas onto which
+					 the virtual CPUs should be bound. This may improve 
+					performance.
+					",
+				),
 		)
 		.arg(
 			Arg::with_name("GDB_PORT")
@@ -144,6 +191,35 @@ fn main() {
 		.value_of("CPUS")
 		.map(|x| utils::parse_u32(&x).unwrap_or(1))
 		.unwrap_or(1);
+
+	let set_cpu_affinity = matches.is_present("CPU_AFFINITY");
+	let cpu_affinity: Option<Vec<core_affinity::CoreId>> = if set_cpu_affinity {
+		let args: Vec<&str> = matches
+			.values_of("CPU_AFFINITY")
+			.unwrap()
+			.into_iter()
+			.collect();
+
+		// According to https://github.com/Elzair/core_affinity_rs/issues/3
+		// on linux this gives a list of CPUs the process is allowed to run on
+		// (as opposed to all CPUs available on the system as the docs suggest)
+		let parsed_affinity =
+			parse_cpu_affinity(args).expect("Invalid parameters passed for CPU_AFFINITY");
+		let core_ids = core_affinity::get_core_ids()
+			.expect("Dependency core_affinity failed to find any available CPUs");
+		let filtered_core_ids = filter_cpu_affinity(core_ids, parsed_affinity);
+		if num_cpus as usize != filtered_core_ids.len() {
+			panic!(
+				"Uhyve was specified to use {} CPUs, but only the following CPUs from the CPU mask \
+				are available: {:?}",
+				num_cpus,
+				filtered_core_ids
+			);
+		}
+		Some(filtered_core_ids)
+	} else {
+		None
+	};
 	let ip = None; //matches.value_of("IP").or(None);
 	let gateway = None; // matches.value_of("GATEWAY").or(None);
 	let mask = None; //matches.value_of("MASK").or(None);
@@ -153,11 +229,14 @@ fn main() {
 	if matches.is_present("MERGEABLE") {
 		mergeable = true;
 	}
-	// per default we use huge page to improve the performace
-	// => negate the result of parase_bool
-	let mut hugepage: bool = !utils::parse_bool("HERMIT_HUGEPAGE", false);
-	if matches.is_present("HUGEPAGE") {
-		hugepage = true;
+	// per default we use huge page to improve the performace,
+	// if the kernel supports transparent hugepages
+	let hugepage_default = utils::transparent_hugepages_available().unwrap_or(true);
+	info!("Default hugepages set to: {}", hugepage_default);
+	// HERMIT_HUGEPAGES overrides the default we detected.
+	let mut hugepage: bool = utils::parse_bool("HERMIT_HUGEPAGE", hugepage_default);
+	if matches.is_present("DISABLE_HUGEPAGE") {
+		hugepage = false;
 	}
 	let mut verbose: bool = utils::parse_bool("HERMIT_VERBOSE", false);
 	if matches.is_present("VERBOSE") {
@@ -192,9 +271,21 @@ fn main() {
 		.map(|tid| {
 			let vm = vm.clone();
 
+			let local_cpu_affinity: Option<CoreId> = match &cpu_affinity {
+				Some(vec) => vec.get(tid as usize).cloned(),
+				None => None,
+			};
+
 			// create thread for each CPU
-			thread::spawn(move || {
+			thread::spawn(move || -> Option<i32> {
 				debug!("Create thread for CPU {}", tid);
+				match local_cpu_affinity {
+					Some(core_id) => {
+						debug!("Trying to pin thread {} to CPU {}", tid, core_id.id);
+						core_affinity::set_for_current(core_id); // This does not return an error if it fails :(
+					}
+					None => debug!("No affinity specified, not binding thread"),
+				}
 
 				let mut cpu = vm.create_cpu(tid).unwrap();
 				cpu.init(vm.get_entry_point()).unwrap();
@@ -202,15 +293,22 @@ fn main() {
 				// only one core is able to enter startup code
 				// => the wait for the predecessor core
 				while tid != vm.cpu_online() {
-					spin_loop_hint();
+					hint::spin_loop();
 				}
 
 				// jump into the VM and excute code of the guest
 				let result = cpu.run();
 				match result {
-					Ok(()) => {}
 					Err(x) => {
 						error!("CPU {} crashes! {}", tid, x);
+						None
+					}
+					Ok(exit_code) => {
+						if let Some(code) = exit_code {
+							std::process::exit(code);
+						}
+
+						None
 					}
 				}
 			})

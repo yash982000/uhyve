@@ -56,7 +56,7 @@ impl UhyveCPU {
 		//debug!("Setup cpuid");
 
 		let mut kvm_cpuid = KVM
-			.get_supported_cpuid(KVM_MAX_MSR_ENTRIES)
+			.get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
 			.or_else(to_error)?;
 		let kvm_cpuid_entries = kvm_cpuid.as_mut_slice();
 		let i = kvm_cpuid_entries
@@ -151,7 +151,8 @@ impl UhyveCPU {
 		msr_entries[0].index = MSR_IA32_MISC_ENABLE;
 		msr_entries[0].data = 1;
 
-		let msrs = Msrs::from_entries(&msr_entries);
+		let msrs = Msrs::from_entries(&msr_entries)
+			.expect("Unable to create initial values for the machine specific registers");
 		self.vcpu.set_msrs(&msrs).or_else(to_error)?;
 
 		Ok(())
@@ -285,7 +286,7 @@ impl VirtualCPU for UhyveCPU {
 		(entry & ((!0usize) << PAGE_BITS)) | (addr & !((!0usize) << PAGE_BITS))
 	}
 
-	fn run(&mut self) -> Result<()> {
+	fn run(&mut self) -> Result<Option<i32>> {
 		//self.print_registers();
 
 		// Pause first CPU before first execution, so we have time to attach debugger
@@ -359,9 +360,9 @@ impl VirtualCPU for UhyveCPU {
 				},
 				VcpuExit::IoOut(port, addr) => {
 					match port {
-						#![allow(clippy::cast_ptr_alignment)]
+						#[allow(clippy::cast_ptr_alignment)]
 						SHUTDOWN_PORT => {
-							return Ok(());
+							return Ok(None);
 						}
 						UHYVE_UART_PORT => {
 							self.uart(String::from_utf8_lossy(&addr).to_string())?;
@@ -386,7 +387,7 @@ impl VirtualCPU for UhyveCPU {
 						UHYVE_PORT_EXIT => {
 							let data_addr: usize =
 								unsafe { (*(addr.as_ptr() as *const u32)) as usize };
-							self.exit(self.host_address(data_addr));
+							return Ok(Some(self.exit(self.host_address(data_addr))));
 						}
 						UHYVE_PORT_OPEN => {
 							let data_addr: usize =
@@ -474,7 +475,7 @@ impl VirtualCPU for UhyveCPU {
 			}
 		}
 
-		Ok(())
+		Ok(None)
 	}
 
 	fn print_registers(&self) {

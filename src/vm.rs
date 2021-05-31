@@ -235,7 +235,7 @@ struct SysUnlink {
 
 pub trait VirtualCPU {
 	fn init(&mut self, entry_point: u64) -> Result<()>;
-	fn run(&mut self) -> Result<()>;
+	fn run(&mut self) -> Result<Option<i32>>;
 	fn print_registers(&self);
 	fn host_address(&self, addr: usize) -> usize;
 	fn virt_to_phys(&self, addr: usize) -> usize;
@@ -366,9 +366,9 @@ pub trait VirtualCPU {
 		Ok(())
 	}
 
-	fn exit(&self, args_ptr: usize) -> ! {
+	fn exit(&self, args_ptr: usize) -> i32 {
 		let sysexit = unsafe { &*(args_ptr as *const SysExit) };
-		std::process::exit(sysexit.arg);
+		sysexit.arg
 	}
 
 	fn open(&self, args_ptr: usize) -> Result<()> {
@@ -536,7 +536,7 @@ pub trait Vm {
 		let elf =
 			elf::Elf::parse(&buffer).map_err(|_| Error::InvalidFile(self.kernel_path().into()))?;
 
-		if elf.libraries.len() > 0 {
+		if !elf.libraries.is_empty() {
 			warn!(
 				"Error: file depends on following libraries: {:?}",
 				elf.libraries

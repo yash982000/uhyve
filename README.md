@@ -1,8 +1,6 @@
 # uhyve - A minimal hypervisor for RustyHermit
 
 [![crates.io](https://img.shields.io/crates/v/uhyve.svg)](https://crates.io/crates/uhyve)
-![Actions Status](https://github.com/hermitcore/uhyve/workflows/Test/badge.svg)
-[![Build Status](https://travis-ci.com/hermitcore/uhyve.svg?branch=master)](https://travis-ci.com/hermitcore/uhyve)
 [![Slack Status](https://matrix.osbyexample.com:3008/badge.svg)](https://matrix.osbyexample.com:3008)
 
 ## Introduction
@@ -59,6 +57,8 @@ sysctl kern.hv_support
 
 The output `kern.hv_support: 1` indicates virtualization support.
 
+Startinhg with Big Sur, all processes using the Hypervisor API must have the [com.apple.security.hypervisor](https://developer.apple.com/documentation/Hypervisor) entitlement and therefor must be signed.
+
 ## Building from source
 
 To build from souce, simply checkout the code and use `cargo build`.
@@ -68,6 +68,29 @@ git clone https://github.com/hermitcore/uhyve.git
 cd uhyve
 cargo build --release
 ```
+
+## Signing uhyve to run on macOS Big Sur
+
+`uhyve` can be self-signed with the following command.
+
+```sh
+codesign -s - --entitlements app.entitlements --force path_to_uhyve/uhyve
+```
+
+The file `app.entitlements` must have following content:
+
+```sh
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.hypervisor</key>
+    <true/>
+</dict>
+</plist>
+```
+
+For further details have a look at [Apple's documentation](https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_security_hypervisor).
 
 ## Running RustyHermit apps within uhyve
 

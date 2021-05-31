@@ -14,13 +14,13 @@ use kvm_ioctls::VmFd;
 use log::debug;
 use nix::sys::mman::*;
 use std::convert::TryInto;
+use std::hint;
 use std::mem;
 use std::net::Ipv4Addr;
 use std::os::raw::c_void;
 use std::ptr;
 use std::ptr::{read_volatile, write_volatile};
 use std::str::FromStr;
-use std::sync::atomic::spin_loop_hint;
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -104,7 +104,7 @@ impl UhyveNetwork {
 
 					evtfd.write(1).expect("Unable to trigger interrupt");
 				} else {
-					spin_loop_hint();
+					hint::spin_loop();
 				}
 			}
 		});
@@ -210,7 +210,7 @@ impl Uhyve {
 			..Default::default()
 		};
 		cap.args[0] =
-			(KVM_X2APIC_API_USE_32BIT_IDS | KVM_X2APIC_API_DISABLE_BROADCAST_QUIRK) as u64;
+			(KVM_X2APIC_API_USE_32BIT_IDS | KVM_X2APIC_API_DISABLE_BROADCAST_QUIRK).into();
 		vm.enable_cap(&cap)
 			.expect("Unable to enable x2apic support");
 
@@ -232,6 +232,17 @@ impl Uhyve {
 		if vm.enable_cap(&cap).is_ok() {
 			panic!("The support of KVM_CAP_IRQFD is curently required");
 		}
+
+		let mut cap: kvm_enable_cap = kvm_bindings::kvm_enable_cap {
+			cap: KVM_CAP_X86_DISABLE_EXITS,
+			flags: 0,
+			..Default::default()
+		};
+		cap.args[0] =
+			(KVM_X86_DISABLE_EXITS_PAUSE | KVM_X86_DISABLE_EXITS_MWAIT | KVM_X86_DISABLE_EXITS_HLT)
+				.into();
+		vm.enable_cap(&cap)
+			.expect("Unable to disable exists due pause instructions");
 
 		let evtfd = EventFd::new(0).unwrap();
 		vm.register_irqfd(&evtfd, UHYVE_IRQ_NET).or_else(to_error)?;
